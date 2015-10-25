@@ -224,9 +224,8 @@ void execute_cgi(int client, const char *path,
 {
     char buf[1024];
 
-    // 这两个是两个文件描述符,在管道中用于子进程和父进程的通信
-    int cgi_output[2];  
-    int cgi_input[2];
+    int fd[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, fd); // 使用socketpair双向管道
 
     pid_t pid;
     int status;
@@ -262,17 +261,6 @@ void execute_cgi(int client, const char *path,
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
     send(client, buf, strlen(buf), 0);
 
-    if (pipe(cgi_output) < 0)
-    {
-        cannot_execute(client);
-        return;
-    }
-    if (pipe(cgi_input) < 0)
-    {
-        cannot_execute(client);
-        return;
-    }
-
     if ( (pid = fork()) < 0 )
     {
         cannot_execute(client);
@@ -284,12 +272,12 @@ void execute_cgi(int client, const char *path,
         char query_env[255];
         char length_env[255];
 
-        dup2(cgi_output[1], 1); // 重定向为标准输出,输出最后处理的内容
-        dup2(cgi_input[0], 0); // 重定向为标准输入,获取POST的内容
+        close(fd[0]);// 关闭管道的父进程端
 
-        // 关闭子进程不用的端
-        close(cgi_output[0]);
-        close(cgi_input[1]);
+        dup2(fd[1], STDIN_FILENO); // 重定向为标准输出,输出最后处理的内容
+        dup2(fd[1], STDOUT_FILENO); // 重定向为标准输入,获取POST的内容
+
+        close(fd[1]);
 
         sprintf(meth_env, "REQUEST_METHOD=%s", method);
         putenv(meth_env);
@@ -310,9 +298,9 @@ void execute_cgi(int client, const char *path,
     }
     else        /* parent */
     {
-        // 关闭不用的端
-        close(cgi_output[1]);
-        close(cgi_input[0]);
+        // 关闭管道的子进程端
+        close(fd[1]);
+
         // 使用POST方法时，WEB服务器通过stdin(标准输入)，向CGI程序传送数据。
         // 服务器 在数据的最后没有使用EOF字符标记，因此程序为了正确的读取stdin
         // 必须使用CONTENT_LENGTH。
@@ -321,14 +309,14 @@ void execute_cgi(int client, const char *path,
             for (i = 0; i < content_length; i++)
             {
                 recv(client, &c, 1, 0);
-                write(cgi_input[1], &c, 1);
+                write(fd[0], &c, 1);
             }
         }
-        while (read(cgi_output[0], &c, 1) > 0)
+        shutdown(fd[0], SHUT_WR);
+        while (read(fd[0], &c, 1) > 0)
             send(client, &c, 1, 0);
 
-        close(cgi_output[0]);
-        close(cgi_input[1]);
+        close(fd[0]);
         waitpid(pid, &status, 0); // 等待子进程结束
     }
 }
